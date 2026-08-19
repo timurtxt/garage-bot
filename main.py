@@ -68,7 +68,7 @@ def start_health_server():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card sending
+# Card sending (Pure Image without duplicate text caption)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_card(bot: Bot, data: dict) -> None:
@@ -76,8 +76,7 @@ async def send_card(bot: Bot, data: dict) -> None:
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
-    caption = f"Въезд в гараж: {data.get('name', 'ТС')}"
-    await bot.send_photo(chat_id=CHAT_ID, photo=buf, caption=caption)
+    await bot.send_photo(chat_id=CHAT_ID, photo=buf)
     log.info("Card sent for '%s'", data.get("name"))
 
 
