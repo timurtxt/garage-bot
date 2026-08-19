@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
+
+# Local Timezone UTC+5 (Uzbekistan / Tashkent / Samarkand)
+TZ_UZB = timezone(timedelta(hours=5))
+
+def now_uzb() -> datetime:
+    return datetime.now(TZ_UZB)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Design tokens — Ultra readable, high contrast, auto-fitting fonts
@@ -81,17 +87,21 @@ def _rr(draw: ImageDraw.Draw, box: List[int], r: int,
 def _fmt_date(dt: Optional[datetime]) -> str:
     if dt is None:
         return "нет данных"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc).astimezone(TZ_UZB)
+    else:
+        dt = dt.astimezone(TZ_UZB)
     m = _MONTHS_RU[dt.month - 1]
     return f"{dt.day} {m} · {dt.strftime('%H:%M')}"
 
 
 def _draw_wash_icon(draw: ImageDraw.Draw, x: int, y: int, color: tuple):
-    """Draw a crisp car wash shower icon at (x, y)."""
-    draw.arc([x, y, x + 16, y + 16], start=180, end=360, fill=color, width=2)
-    draw.line([(x + 8, y), (x + 8, y - 4), (x + 18, y - 4)], fill=color, width=2)
-    draw.line([(x + 2, y + 18), (x, y + 26)], fill=color, width=2)
-    draw.line([(x + 8, y + 18), (x + 8, y + 27)], fill=color, width=2)
-    draw.line([(x + 14, y + 18), (x + 16, y + 26)], fill=color, width=2)
+    """Draw a clean car wash shower icon at (x, y)."""
+    draw.arc([x, y, x + 18, y + 18], start=180, end=360, fill=color, width=2)
+    draw.line([(x + 9, y), (x + 9, y - 5), (x + 20, y - 5)], fill=color, width=2)
+    draw.line([(x + 3, y + 20), (x + 1, y + 28)], fill=color, width=2)
+    draw.line([(x + 9, y + 20), (x + 9, y + 29)], fill=color, width=2)
+    draw.line([(x + 15, y + 20), (x + 17, y + 28)], fill=color, width=2)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -100,10 +110,8 @@ def _draw_wash_icon(draw: ImageDraw.Draw, x: int, y: int, color: tuple):
 
 def render_card(data: Dict[str, Any]) -> Image.Image:
     """
-    Render a garage-entry notification card with:
-    - Auto-fitted vehicle title (never cuts off)
-    - Exit-to-entry duration highlight (>= 4 days: RED, >= 3 days: YELLOW)
-    - Car wash status banner
+    Render a garage-entry notification card with local UTC+5 timezone,
+    auto-fitted fonts, exit-to-entry duration highlights, and wash banner.
     """
     m_list: List[Dict] = data.get("maintenance") or []
     warn_km = int(data.get("warning_km", 500))
@@ -113,8 +121,8 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
     warn_items    = [m for m in m_list if 0 <= m.get("remaining_km", 0) <= warn_km]
     normal_items  = [m for m in m_list if m.get("remaining_km", 0) > warn_km]
 
-    # Calculate trip duration between last exit and current entry
-    entry_time = data.get("entry_time") or datetime.now()
+    # Calculate trip duration between last exit and current entry in UTC+5
+    entry_time = data.get("entry_time") or now_uzb()
     last_exit  = data.get("last_exit")
 
     trip_days = 0.0
@@ -122,7 +130,9 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
     exit_status = "normal"  # normal | yellow | red
 
     if last_exit:
-        delta = entry_time - last_exit
+        t_entry = entry_time if entry_time.tzinfo else entry_time.replace(tzinfo=TZ_UZB)
+        t_exit  = last_exit if last_exit.tzinfo else last_exit.replace(tzinfo=TZ_UZB)
+        delta   = t_entry - t_exit
         trip_days = delta.total_seconds() / 86400.0
         days_int = int(delta.days)
         hours_int = int(delta.seconds // 3600)
@@ -156,7 +166,7 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
         "m_hdr"    : _font(22, bold=True),
         "m_name"   : _font(20, bold=True),
         "m_val"    : _font(20, bold=True),
-        "wash_lbl" : _font(20, bold=True),
+        "wash_lbl" : _font(21, bold=True),
         "footer"   : _font(19, bold=True),
     }
 
@@ -224,12 +234,12 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
     draw.line([(PAD, y), (CARD_W - PAD, y)], fill=SEP, width=2)
     y += 16
 
-    # ════ 2. STATUS (online + timestamp) ══════════════════════════════════════
+    # ════ 2. STATUS (online + local timestamp) ════════════════════════════════
     R = 9
     draw.ellipse([PAD, y + 4, PAD + R * 2, y + 4 + R * 2], fill=GREEN_D)
     draw.text((PAD + R * 2 + 10, y), "online", font=F["online"], fill=GREEN)
 
-    entry_str = _fmt_date(entry_time)
+    entry_str = f"Въезд: {_fmt_date(entry_time)}"
     tw = draw.textlength(entry_str, font=F["time"])
     draw.text((CARD_W - PAD - tw, y), entry_str, font=F["time"], fill=BLACK)
     y += 36
@@ -311,19 +321,19 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
         wash_bg  = RED_BG
         wash_bd  = RED_BD
         wash_txt = RED_TEXT
-        wash_text = "🚿 МОЙКА МАШИНЫ: ТРЕБУЕТСЯ ПОМЫТЬ АВТОМОБИЛЬ"
+        wash_text = "МОЙКА МАШИНЫ: ТРЕБУЕТСЯ ПОМЫТЬ АВТОМОБИЛЬ"
     else:
         wash_bg  = (240, 253, 244)  # Light soft green
         wash_bd  = (134, 239, 172)  # Soft green border
         wash_txt = (21, 128, 61)    # Deep green text
-        wash_text = "🚿 МОЙКА МАШИНЫ: НЕ ТРЕБУЕТСЯ"
+        wash_text = "МОЙКА МАШИНЫ: НЕ ТРЕБУЕТСЯ"
 
     w_box = [PAD, y, CARD_W - PAD, y + 52]
     _rr(draw, w_box, r=10, fill=wash_bg, outline=wash_bd, width=2)
 
-    # Draw wash shower icon
-    _draw_wash_icon(draw, PAD + 16, y + 14, wash_txt)
-    draw.text((PAD + 48, y + 14), wash_text, font=F["wash_lbl"], fill=wash_txt)
+    # Draw clean wash shower icon
+    _draw_wash_icon(draw, PAD + 16, y + 12, wash_txt)
+    draw.text((PAD + 52, y + 14), wash_text, font=F["wash_lbl"], fill=wash_txt)
     y += 52 + 18
 
     # ════ 6. ALL MAINTENANCE INTERVALS SECTION ════════════════════════════════
