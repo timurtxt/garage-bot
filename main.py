@@ -2,7 +2,9 @@ import asyncio
 import io
 import logging
 import os
+import threading
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 from telegram import Bot
@@ -21,9 +23,10 @@ TG_TOKEN      = os.environ["TELEGRAM_TOKEN"]
 WIALON_TOKEN  = os.environ["WIALON_TOKEN"]
 CHAT_ID       = os.environ["TELEGRAM_CHAT_ID"]
 ZONE_NAME     = os.getenv("GARAGE_ZONE_NAME",    "БКС Гараж")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL",    "60"))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL",    "10"))
 WARN_KM       = int(os.getenv("MAINTENANCE_WARN_KM", "500"))
 WIALON_URL    = os.getenv("WIALON_URL", "https://2.smartgps.uz")
+PORT          = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +37,31 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Health check HTTP server for Render/Cloud platforms
+# ──────────────────────────────────────────────────────────────────────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Garage Bot is running OK 24/7\n")
+
+    def log_message(self, format, *args):
+        pass  # Quiet HTTP logs
+
+
+def start_health_server():
+    """Start lightweight background HTTP server on PORT for cloud health checks."""
+    try:
+        server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+        log.info("Health-check HTTP server listening on port %d", PORT)
+        server.serve_forever()
+    except Exception as e:
+        log.warning("HTTP health server error: %s", e)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -57,6 +85,10 @@ async def send_card(bot: Bot, data: dict) -> None:
 async def main() -> None:
     log.info("=== Garage Bot starting ===")
     log.info("Zone: %s | Poll: %ds | Warn at <= %d km", ZONE_NAME, POLL_INTERVAL, WARN_KM)
+
+    # Start HTTP server in a separate daemon thread for Render health checks
+    http_thread = threading.Thread(target=start_health_server, daemon=True)
+    http_thread.start()
 
     bot    = Bot(token=TG_TOKEN)
     wialon = WialonClient(WIALON_TOKEN, base_url=WIALON_URL)
@@ -125,7 +157,7 @@ async def main() -> None:
                                 log.error("Telegram error: %s", te)
                             except Exception as ce:
                                 log.error("Card error for '%s': %s", unit.get("nm"), ce, exc_info=True)
-                        
+
                         db.record_entry(uid, unit.get("nm", ""))
 
                 else:
