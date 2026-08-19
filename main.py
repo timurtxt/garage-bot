@@ -3,7 +3,7 @@ import io
 import logging
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
@@ -28,6 +28,9 @@ WARN_KM       = int(os.getenv("MAINTENANCE_WARN_KM", "500"))
 WIALON_URL    = os.getenv("WIALON_URL", "https://2.smartgps.uz")
 PORT          = int(os.getenv("PORT", "10000"))
 
+# Local Uzbekistan Timezone (UTC+5)
+TZ_UZB = timezone(timedelta(hours=5))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -51,7 +54,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Garage Bot is running OK 24/7\n")
 
     def log_message(self, format, *args):
-        pass  # Quiet HTTP logs
+        pass
 
 
 def start_health_server():
@@ -144,7 +147,7 @@ async def main() -> None:
                                 card_data = {
                                     "name"       : unit.get("nm", "Неизвестно"),
                                     "driver"     : wialon.get_driver(unit),
-                                    "entry_time" : datetime.now(),
+                                    "entry_time" : datetime.now(TZ_UZB),
                                     "last_exit"  : db.get_last_exit(uid),
                                     "fuel"       : wialon.get_fuel(unit),
                                     "mileage"    : wialon.get_mileage(unit),
