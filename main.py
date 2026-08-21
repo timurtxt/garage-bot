@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Health check HTTP server for Render/Cloud platforms
+# Health check HTTP server (Supports GET and HEAD for UptimeRobot)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -52,6 +52,11 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"Garage Bot is running OK 24/7\n")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
@@ -68,7 +73,7 @@ def start_health_server():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card sending (Pure Image without duplicate text caption)
+# Card sending
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_card(bot: Bot, data: dict) -> None:
