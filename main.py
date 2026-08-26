@@ -17,18 +17,20 @@ from wialon_client import WialonClient
 load_dotenv(encoding="utf-8")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Config
+# 1. Группы, куда отправлять ВСЕ въезды (через запятую)
 # ──────────────────────────────────────────────────────────────────────────────
-TG_TOKEN      = os.environ["TELEGRAM_TOKEN"]
-WIALON_TOKEN  = os.environ["WIALON_TOKEN"]
+raw_all_chats        = os.environ.get("TELEGRAM_CHAT_ID", "")
+ALL_CHAT_IDS         = [cid.strip() for cid in raw_all_chats.split(",") if cid.strip()]
 
-# Поддержка нескольких групп через запятую
-raw_chats     = os.environ.get("TELEGRAM_CHAT_ID", "")
-CHAT_IDS      = [cid.strip() for cid in raw_chats.split(",") if cid.strip()]
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. Группы, куда отправлять ТОЛЬКО НАРУШЕНИЯ (через запятую)
+# ──────────────────────────────────────────────────────────────────────────────
+raw_violation_chats  = os.environ.get("VIOLATIONS_CHAT_ID", "")
+VIOLATION_CHAT_IDS   = [cid.strip() for cid in raw_violation_chats.split(",") if cid.strip()]
 
 ZONE_NAME     = os.getenv("GARAGE_ZONE_NAME",    "БКС Гараж")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL",    "10"))
-WARN_KM       = int(os.getenv("MAINTENANCE_WARN_KM", "500"))
+WARN_KM       = int(os.getenv("MAINTENANCE_WARN_KM", "300"))
 WIALON_URL    = os.getenv("WIALON_URL", "https://2.smartgps.uz")
 PORT          = int(os.getenv("PORT", "10000"))
 
@@ -44,6 +46,38 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Проверка нарушений
+# ──────────────────────────────────────────────────────────────────────────────
+
+def has_violations(data: dict) -> bool:
+    """Проверяет наличие нарушений: ТО просрочено/подошло (<=300 км), или превышен срок рейса/мойки."""
+    # 1. Проверка сервисных интервалов ТО (<= 300 км или просрочка)
+    m_list = data.get("maintenance") or []
+    warn_km = int(data.get("warning_km", 300))
+    if any(m.get("remaining_km", 0) <= warn_km for m in m_list):
+        return True
+
+    # 2. Проверка срока нахождения в рейсе / мойки (6 дней для миксеров, 4 дня для остальных)
+    last_exit = data.get("last_exit")
+    entry_time = data.get("entry_time") or datetime.now(TZ_UZB)
+    if last_exit:
+        t_entry = entry_time if entry_time.tzinfo else entry_time.replace(tzinfo=TZ_UZB)
+        t_exit  = last_exit if last_exit.tzinfo else last_exit.replace(tzinfo=TZ_UZB)
+        delta   = t_entry - t_exit
+        trip_days = delta.total_seconds() / 86400.0
+
+        name_lower = data.get("name", "").lower()
+        is_mixer = "миксер" in name_lower or "mixer" in name_lower
+        wash_days_limit = 6 if is_mixer else 4
+        warn_days_limit = wash_days_limit - 1
+
+        if trip_days >= float(warn_days_limit):
+            return True
+
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -77,18 +111,27 @@ def start_health_server():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card sending (Sends to ALL configured groups)
+# Card sending (Раздельная отправка во все группы и в группу нарушений)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_card(bot: Bot, data: dict) -> None:
     img = render_card(data)
-    for chat_id in CHAT_IDS:
+    is_violation = has_violations(data)
+
+    # 1. Основные группы (получают ВСЕ карточки)
+    target_chats = set(ALL_CHAT_IDS)
+
+    # 2. Группа нарушений (получает только если есть нарушение)
+    if is_violation and VIOLATION_CHAT_IDS:
+        target_chats.update(VIOLATION_CHAT_IDS)
+
+    for chat_id in target_chats:
         try:
             buf = io.BytesIO()
             img.save(buf, format="PNG", optimize=True)
             buf.seek(0)
             await bot.send_photo(chat_id=chat_id, photo=buf)
-            log.info("Card sent for '%s' to group %s", data.get("name"), chat_id)
+            log.info("Card sent for '%s' to group %s (violation=%s)", data.get("name"), chat_id, is_violation)
         except Exception as te:
             log.error("Failed to send card to %s: %s", chat_id, te)
 
@@ -99,7 +142,8 @@ async def send_card(bot: Bot, data: dict) -> None:
 
 async def main() -> None:
     log.info("=== Garage Bot starting ===")
-    log.info("Groups count: %d (%s)", len(CHAT_IDS), CHAT_IDS)
+    log.info("All-events groups (%d): %s", len(ALL_CHAT_IDS), ALL_CHAT_IDS)
+    log.info("Violations-only groups (%d): %s", len(VIOLATION_CHAT_IDS), VIOLATION_CHAT_IDS)
     log.info("Zone: %s | Poll: %ds | Warn at <= %d km", ZONE_NAME, POLL_INTERVAL, WARN_KM)
 
     # Start HTTP server in a separate daemon thread for Render health checks
