@@ -21,7 +21,11 @@ load_dotenv(encoding="utf-8")
 # ──────────────────────────────────────────────────────────────────────────────
 TG_TOKEN      = os.environ["TELEGRAM_TOKEN"]
 WIALON_TOKEN  = os.environ["WIALON_TOKEN"]
-CHAT_ID       = os.environ["TELEGRAM_CHAT_ID"]
+
+# Поддержка нескольких групп через запятую
+raw_chats     = os.environ.get("TELEGRAM_CHAT_ID", "")
+CHAT_IDS      = [cid.strip() for cid in raw_chats.split(",") if cid.strip()]
+
 ZONE_NAME     = os.getenv("GARAGE_ZONE_NAME",    "БКС Гараж")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL",    "10"))
 WARN_KM       = int(os.getenv("MAINTENANCE_WARN_KM", "500"))
@@ -73,16 +77,20 @@ def start_health_server():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card sending
+# Card sending (Sends to ALL configured groups)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_card(bot: Bot, data: dict) -> None:
     img = render_card(data)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    await bot.send_photo(chat_id=CHAT_ID, photo=buf)
-    log.info("Card sent for '%s'", data.get("name"))
+    for chat_id in CHAT_IDS:
+        try:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            buf.seek(0)
+            await bot.send_photo(chat_id=chat_id, photo=buf)
+            log.info("Card sent for '%s' to group %s", data.get("name"), chat_id)
+        except Exception as te:
+            log.error("Failed to send card to %s: %s", chat_id, te)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -91,6 +99,7 @@ async def send_card(bot: Bot, data: dict) -> None:
 
 async def main() -> None:
     log.info("=== Garage Bot starting ===")
+    log.info("Groups count: %d (%s)", len(CHAT_IDS), CHAT_IDS)
     log.info("Zone: %s | Poll: %ds | Warn at <= %d km", ZONE_NAME, POLL_INTERVAL, WARN_KM)
 
     # Start HTTP server in a separate daemon thread for Render health checks
