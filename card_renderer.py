@@ -25,12 +25,12 @@ DARK_LBL = (30,  41,  59)    # Solid dark for labels
 GREEN    = (21,  128, 61)    # Deep green
 GREEN_D  = (34,  197, 94)
 
-# Overdue / >4 days alert (Red)
+# Overdue / Alert Red
 RED_TEXT = (185, 28,  28)
 RED_BG   = (254, 242, 242)
 RED_BD   = (239, 68,  68)
 
-# Warning / 3 days alert (Amber / Yellow)
+# Warning Amber / Yellow
 WARN_TXT = (180, 83,  9)
 WARN_BG  = (254, 243, 199)
 WARN_BD  = (245, 158, 11)
@@ -110,11 +110,13 @@ def _draw_wash_icon(draw: ImageDraw.Draw, x: int, y: int, color: tuple):
 
 def render_card(data: Dict[str, Any]) -> Image.Image:
     """
-    Render a garage-entry notification card with local UTC+5 timezone,
-    auto-fitted fonts, exit-to-entry duration highlights, and wash banner.
+    Render a garage-entry notification card with:
+    - Vehicle-type specific wash threshold (Mixers: 6 days, Tonars/Dump: 4 days)
+    - 300 km maintenance warning limit
+    - Auto-fitted fonts and local UTC+5 timestamps
     """
     m_list: List[Dict] = data.get("maintenance") or []
-    warn_km = int(data.get("warning_km", 500))
+    warn_km = int(data.get("warning_km", 300))
 
     # Categorize maintenance items
     overdue_items = [m for m in m_list if m.get("remaining_km", 0) < 0]
@@ -129,6 +131,14 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
     trip_str = ""
     exit_status = "normal"  # normal | yellow | red
 
+    # Determine wash and trip threshold based on vehicle type:
+    # Mixers ("миксер") -> 6 days; Tonars, Dump trucks & others -> 4 days
+    raw_name = data.get("name", "Неизвестно")
+    name_lower = raw_name.lower()
+    is_mixer = "миксер" in name_lower or "mixer" in name_lower
+    wash_days_limit = 6 if is_mixer else 4
+    warn_days_limit = wash_days_limit - 1
+
     if last_exit:
         t_entry = entry_time if entry_time.tzinfo else entry_time.replace(tzinfo=TZ_UZB)
         t_exit  = last_exit if last_exit.tzinfo else last_exit.replace(tzinfo=TZ_UZB)
@@ -141,14 +151,13 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
         else:
             trip_str = f"{hours_int} ч"
 
-        if trip_days >= 4.0:
+        if trip_days >= float(wash_days_limit):
             exit_status = "red"
-        elif trip_days >= 3.0:
+        elif trip_days >= float(warn_days_limit):
             exit_status = "yellow"
 
     # Name and driver
-    raw_name = data.get("name", "Неизвестно")
-    drv      = data.get("driver", "Не назначен")
+    drv = data.get("driver", "Не назначен")
 
     # Title auto-fitting to card width
     max_title_w = CARD_W - 2 * PAD
@@ -175,12 +184,12 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
 
     if exit_status == "red":
         alert_rows.append((
-            f"⚠ В РЕЙСЕ БОЛЕЕ 4 СУТОК: {trip_str}\nВыезд был: {_fmt_date(last_exit)}",
+            f"⚠ В РЕЙСЕ БОЛЕЕ {wash_days_limit} СУТОК: {trip_str}\nВыезд был: {_fmt_date(last_exit)}",
             RED_BG, RED_BD, RED_TEXT
         ))
     elif exit_status == "yellow":
         alert_rows.append((
-            f"⚠ В РЕЙСЕ БОЛЕЕ 3 СУТОК: {trip_str}\nВыезд был: {_fmt_date(last_exit)}",
+            f"⚠ В РЕЙСЕ БОЛЕЕ {warn_days_limit} СУТОК: {trip_str}\nВыезд был: {_fmt_date(last_exit)}",
             WARN_BG, WARN_BD, WARN_TXT
         ))
 
@@ -307,7 +316,7 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
     draw.text((bx2 + 14, by + 46), mval, font=F["box_val"], fill=BLACK)
     draw.text((bx2 + 14, by + 90), msub, font=F["box_sub"], fill=DARK_LBL)
 
-    # Draw Box 3 (Highlighted if >= 3 or 4 days)
+    # Draw Box 3 (Highlighted if >= 3 or 4 days, or 5/6 days for mixers)
     bx3 = PAD + 2 * (bw + gap)
     _rr(draw, [bx3, by, bx3 + bw, by + H_BOXES], r=12, fill=b3_bg, outline=b3_bd, width=3 if exit_status != "normal" else 2)
     draw.text((bx3 + 14, by + 14), "Посл. выезд:", font=F["box_lbl"], fill=b3_sub_col)
@@ -317,7 +326,7 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
     y = by + H_BOXES + 20
 
     # ════ 5. CAR WASH BANNER SECTION ═════════════════════════════════════════
-    if trip_days >= 4.0:
+    if trip_days >= float(wash_days_limit):
         wash_bg  = RED_BG
         wash_bd  = RED_BD
         wash_txt = RED_TEXT
@@ -378,27 +387,3 @@ def render_card(data: Dict[str, Any]) -> Image.Image:
     )
 
     return img
-
-
-def _build_boxes(data: Dict[str, Any]) -> List[Tuple[str, str]]:
-    # Box 1 – Fuel
-    fuel = data.get("fuel")
-    if fuel and fuel.get("level") is not None:
-        lvl = fuel.get("level", 0)
-        pct = fuel.get("pct")
-        fval = f"{lvl:.0f} л · {pct:.0f}%" if pct is not None else f"{lvl:.0f} л"
-    else:
-        fval = "нет датчика"
-
-    # Box 2 – Mileage
-    mi = data.get("mileage")
-    mval = f"{mi:,.0f} км".replace(",", " ") if mi is not None else "нет данных"
-
-    # Box 3 – Last exit
-    exval = _fmt_date(data.get("last_exit"))
-
-    return [
-        ("Топливо:", fval),
-        ("Пробег:",  mval),
-        ("Выезд:",   exval),
-    ]
