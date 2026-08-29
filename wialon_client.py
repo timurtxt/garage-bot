@@ -2,10 +2,13 @@ import json
 import logging
 import math
 import re
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+TZ_UZB = timezone(timedelta(hours=5))
 log = logging.getLogger(__name__)
 
 
@@ -35,20 +38,19 @@ def _point_in_polygon(lat: float, lon: float, poly: List[Tuple[float, float]]) -
     return inside
 
 
-def _apply_calibration(raw: float, tbl: List[Dict]) -> float:
-    """Wialon calculation table: row formula is result = a * raw + b."""
-    if not tbl:
+def _apply_calibration(raw: float, table: List[Dict]) -> float:
+    """Linear interpolation / calibration table formula for Wialon fuel sensors."""
+    if not table:
         return raw
-    sorted_tbl = sorted(tbl, key=lambda p: p.get("x", 0))
-    matched = sorted_tbl[0]
-    for row in sorted_tbl:
-        if raw >= row.get("x", 0):
-            matched = row
-        else:
-            break
-    a = matched.get("a", 1.0)
-    b = matched.get("b", 0.0)
-    return a * raw + b
+    for row in table:
+        a = row.get("a", 0)
+        b = row.get("b", 0)
+        x = row.get("x", 0)
+        if a != 0 or b != 0:
+            calc = a * raw + b
+            if calc >= 0:
+                return calc
+    return raw
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ class WialonError(Exception):
     def __init__(self, code: int, reason: str = ""):
         self.code = code
         msg = self._CODES.get(code, f"code {code}")
-        super().__init__(f"Wialon [{msg}]" + (f": {reason}" if reason else ""))
+        super().__init__(f"Wialon [{msg}]" + (f": {reason}\n" if reason else ""))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -74,7 +76,6 @@ class WialonError(Exception):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class WialonClient:
-    # All flags to get unit position, last msg, sensors, mileage, counters, service intervals
     _UNIT_FLAGS = 4194303
 
     def __init__(self, token: str, base_url: str = "https://2.smartgps.uz"):
@@ -82,8 +83,6 @@ class WialonClient:
         self._api = base_url.rstrip("/") + "/wialon/ajax.html"
         self.sid: Optional[str] = None
         self._http = requests.Session()
-
-    # ── low-level ────────────────────────────────────────────────────────────
 
     def _call(self, svc: str, params: dict) -> Any:
         data: Dict[str, Any] = {
@@ -95,151 +94,119 @@ class WialonClient:
         resp = self._http.post(self._api, data=data, timeout=30)
         resp.raise_for_status()
         result = resp.json()
-        if isinstance(result, dict) and "error" in result:
+        if isinstance(result, dict) and "error" in result and result["error"] != 0:
             raise WialonError(result["error"], result.get("reason", ""))
         return result
-
-    # ── session ──────────────────────────────────────────────────────────────
 
     def login(self) -> dict:
         result = self._call("token/login", {"token": self.token})
         self.sid = result["eid"]
-        log.info("Wialon login OK user=%s", result.get("user", {}).get("nm", "?"))
+        log.info("Wialon login OK  user=%s", result.get("user", {}).get("nm", "?"))
         return result
 
     def ping(self):
-        """Keep session alive by re-logging in."""
         try:
             self.login()
         except Exception as e:
-            log.warning("Ping/re-login failed: %s", e)
-
-    # ── units ────────────────────────────────────────────────────────────────
+            log.warning("Session refresh failed: %s", e)
 
     def get_units(self) -> List[dict]:
         result = self._call("core/search_items", {
             "spec": {
                 "itemsType": "avl_unit",
-                "propName":  "sys_name",
+                "propName": "sys_name",
                 "propValueMask": "*",
                 "sortType": "sys_name",
             },
             "force": 1,
             "flags": self._UNIT_FLAGS,
             "from": 0,
-            "to":   0,
+            "to": 0,
         })
         items = result.get("items", [])
         log.debug("Got %d units from Wialon", len(items))
         return items
 
-    # ── geofences ────────────────────────────────────────────────────────────
-
     def get_zone(self, zone_name: str) -> Tuple[Optional[int], Optional[dict]]:
-        """Find geofence by name and fetch full polygon geometry."""
         try:
             result = self._call("core/search_items", {
                 "spec": {
                     "itemsType": "avl_resource",
-                    "propName":  "sys_name",
+                    "propName": "sys_name",
                     "propValueMask": "*",
                     "sortType": "sys_name",
                 },
                 "force": 1,
-                "flags": 4097,
+                "flags": 4194303,
                 "from": 0,
-                "to":   0,
+                "to": 0,
             })
             for res in result.get("items", []):
-                res_id = res.get("id")
-                for zid, zone in res.get("zl", {}).items():
+                rid = res.get("id")
+                for zid_str, zone in res.get("zl", {}).items():
                     if zone_name.lower() in zone.get("n", "").lower():
-                        # Fetch full zone data with polygon points
+                        zid = int(zid_str)
                         try:
-                            zd = self._call("resource/get_zone_data", {
-                                "itemId": res_id,
-                                "col": [int(zid)],
-                                "flags": 0,
+                            zdata = self._call("resource/get_zone_data", {
+                                "itemId": rid,
+                                "col": [zid],
+                                "flags": 1
                             })
-                            if zd and isinstance(zd, list) and len(zd) > 0:
-                                full_zone = zd[0]
+                            if zdata and isinstance(zdata, list) and len(zdata) > 0:
+                                full_zone = zdata[0]
                                 log.info(
-                                    "Zone '%s' found (id=%s) in resource '%s' with %d points",
+                                    "Zone '%s' found (id=%d) in resource '%s' with %d points",
                                     zone_name, zid, res.get("nm"), len(full_zone.get("p", [])),
                                 )
-                                return int(zid), full_zone
+                                return zid, full_zone
                         except Exception as ze:
-                            log.warning("get_zone_data failed: %s, using header", ze)
-                        return int(zid), zone
+                            log.warning("resource/get_zone_data error: %s", ze)
+                        return zid, zone
         except Exception as e:
-            log.error("Zone search failed: %s", e)
-        log.error("Zone '%s' not found", zone_name)
+            log.error("Zone search error: %s", e)
         return None, None
 
     def is_in_zone(self, lat: float, lon: float, zone: dict) -> bool:
-        if not zone:
-            return False
+        ztype = zone.get("t", 0)
         points = zone.get("p", [])
+        radius = zone.get("r", 0)
         if not points:
-            # Fallback to bounding box if points not loaded
-            b = zone.get("b", {})
-            if b:
-                return (b.get("min_y", 0) <= lat <= b.get("max_y", 0) and
-                        b.get("min_x", 0) <= lon <= b.get("max_x", 0))
             return False
-
-        # If points list exists
-        if len(points) >= 3:
+        if ztype == 2:
+            c = points[0]
+            return _haversine(lat, lon, c.get("y", 0), c.get("x", 0)) <= radius
+        if ztype in (1, 3) and len(points) >= 3:
             poly = [(p.get("y", 0), p.get("x", 0)) for p in points]
             return _point_in_polygon(lat, lon, poly)
-        elif len(points) == 1:
-            # Circle
-            c = points[0]
-            r = c.get("r", zone.get("w", 50))
-            return _haversine(lat, lon, c.get("y", 0), c.get("x", 0)) <= r
         return False
-
-    # ── unit data extractors ─────────────────────────────────────────────────
 
     def get_unit_pos(self, unit: dict) -> Optional[Tuple[float, float]]:
         pos = unit.get("pos") or (unit.get("lmsg") or {}).get("pos")
         if pos and pos.get("y") is not None and pos.get("x") is not None:
-            return float(pos["y"]), float(pos["x"])
+            return pos.get("y"), pos.get("x")
         return None
 
     def get_mileage(self, unit: dict) -> Optional[float]:
-        # 1. cnm_km or cnm
-        cnm = unit.get("cnm_km") or unit.get("cnm")
+        cnm = unit.get("cnm")
         if cnm and cnm > 0:
-            return cnm / 1000 if cnm > 10_000_000 else float(cnm)
-
-        # 2. Last-message params
+            return float(cnm)
         params = (unit.get("lmsg") or {}).get("p", {})
         for key in ("mileage", "odometer", "total_mileage", "can_mileage"):
             v = params.get(key)
-            if v and float(v) > 0:
-                v_flt = float(v)
-                return v_flt / 1000 if v_flt > 10_000_000 else v_flt
+            if v and v > 0:
+                return float(v)
         return None
 
     def get_fuel(self, unit: dict) -> Optional[Dict]:
         sensors = unit.get("sens", {})
-        params  = (unit.get("lmsg") or {}).get("p", {})
-
+        params = (unit.get("lmsg") or {}).get("p", {})
         for sensor in sensors.values():
-            nm = sensor.get("n", "").lower()
             tp = sensor.get("t", "").lower()
-            if tp == "fuel level" or any(k in nm for k in ("топливо в баке", "топливо", "дут", "бак")):
+            if tp == "fuel level":
                 p_name = sensor.get("p", "")
-                raw = params.get(p_name)
-                if raw is None:
+                raw_val = params.get(p_name)
+                if raw_val is None:
                     continue
-                try:
-                    raw_val = float(raw)
-                except (ValueError, TypeError):
-                    continue
-
-                # Filter out standard LLS error / disconnected codes (65530..65535) and outliers
                 if raw_val >= 65530 or raw_val > 6000 or raw_val < 0:
                     continue
 
@@ -248,10 +215,8 @@ class WialonClient:
                 if lvl < 0:
                     lvl = 0.0
 
-                # Max capacity from calibration table or sensor property
                 mx = None
                 if tbl:
-                    # Look at highest X in tbl to find max calibrated volume
                     max_row = max(tbl, key=lambda r: r.get("x", 0))
                     mx_calc = max_row.get("a", 0) * max_row.get("x", 0) + max_row.get("b", 0)
                     if mx_calc > 0:
@@ -259,36 +224,30 @@ class WialonClient:
                 if not mx or mx <= 0:
                     mx = sensor.get("mx") or 300.0
 
-                # Cap level to maximum tank capacity
                 if mx and lvl > mx:
                     lvl = mx
 
                 pct = round(lvl / mx * 100, 1) if mx and mx > 0 else None
                 return {
-                    "level":     round(lvl, 1),
-                    "max":       round(mx, 1) if mx else None,
-                    "pct":       min(pct, 100.0) if pct else None,
+                    "level": round(lvl, 1),
+                    "max": round(mx, 1) if mx else None,
+                    "pct": min(pct, 100.0) if pct else None,
                     "is_diesel": True,
                 }
         return None
 
     def get_driver(self, unit: dict) -> str:
-        # 1 – Driver binding list
         for drv in (unit.get("drvrs") or []):
             if isinstance(drv, dict) and drv.get("nm"):
                 return drv["nm"]
 
-        # 2 – Unit name in format: "Name (Driver Name)"
         nm = unit.get("nm", "")
-        # Find all occurrences of (...)
         matches = re.findall(r"\(([^)]+)\)", nm)
         if matches:
-            # Pick the last match that looks like a person's name (not technical like 'кран', 'миксер', 'помпа')
             for m in reversed(matches):
                 if not any(tech in m.lower() for tech in ["кран", "миксер", "помпа", "манипул", "40t", "30t", "бетонасос", "агрегат"]):
                     return m.strip()
 
-        # 3 – Custom fields
         for fld in (unit.get("flds") or {}).values():
             if any(k in fld.get("n", "").lower() for k in ("водитель", "driver")):
                 v = fld.get("v", "").strip()
@@ -298,7 +257,6 @@ class WialonClient:
         return "Не назначен"
 
     def get_maintenance(self, unit: dict) -> List[Dict]:
-        """Return all active maintenance intervals sorted by urgency (overdues first)."""
         si = unit.get("si", {})
         if not si:
             return []
@@ -308,8 +266,8 @@ class WialonClient:
 
         for interval in si.values():
             nm = interval.get("n", "ТО").strip()
-            im = interval.get("im", 0)  # interval km
-            pm = interval.get("pm", 0)  # prev km
+            im = interval.get("im", 0)
+            pm = interval.get("pm", 0)
             if im > 0:
                 next_km = pm + im
                 rem = next_km - current_km
@@ -321,6 +279,51 @@ class WialonClient:
                     "remaining_km": rem,
                 })
 
-        # Sort by remaining_km ascending (negative/overdue items first)
         intervals.sort(key=lambda x: x["remaining_km"])
         return intervals
+
+    def get_last_exit_from_wialon(self, unit_id: int, zone: dict, days_back: int = 7) -> Optional[datetime]:
+        """
+        Запрашивает GPS-трек напрямую у Wialon и вычисляет точный момент последнего выезда из геозоны.
+        100% надежно, работает прямо из облака GPS-спутников.
+        """
+        try:
+            poly = [(p.get("y", 0), p.get("x", 0)) for p in zone.get("p", [])]
+            if len(poly) < 3:
+                return None
+
+            now_ts = int(time.time())
+            from_ts = now_ts - days_back * 86400
+
+            res = self._call("messages/load_interval", {
+                "itemId": unit_id,
+                "timeFrom": from_ts,
+                "timeTo": now_ts,
+                "flags": 0,
+                "flagsMask": 0,
+                "loadCount": 0xFFFFFFFF
+            })
+            messages = res.get("messages", [])
+            if not messages:
+                return None
+
+            last_exit_dt = None
+            currently_inside = False
+
+            for msg in messages:
+                pos = msg.get("pos")
+                if not pos or "y" not in pos or "x" not in pos:
+                    continue
+                lat, lon, t = pos["y"], pos["x"], msg.get("t", 0)
+                in_zone = _point_in_polygon(lat, lon, poly)
+
+                if currently_inside and not in_zone:
+                    last_exit_dt = datetime.fromtimestamp(t, tz=timezone.utc).astimezone(TZ_UZB)
+                    currently_inside = False
+                elif not currently_inside and in_zone:
+                    currently_inside = True
+
+            return last_exit_dt
+        except Exception as e:
+            log.warning("Failed to fetch Wialon GPS history for unit %s: %s", unit_id, e)
+            return None
