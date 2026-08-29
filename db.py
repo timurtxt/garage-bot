@@ -1,8 +1,9 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Set
 
 DB_PATH = "garage_bot.db"
+TZ_UZB = timezone(timedelta(hours=5))
 
 
 class Database:
@@ -47,8 +48,8 @@ class Database:
                 [(uid,) for uid in unit_ids],
             )
 
-    def record_entry(self, unit_id: int, unit_name: str):
-        now = datetime.now().isoformat()
+    def record_entry(self, unit_id: int, unit_name: str, dt: Optional[datetime] = None):
+        now = (dt or datetime.now(TZ_UZB)).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -64,8 +65,8 @@ class Database:
                 (unit_id, unit_name, now),
             )
 
-    def record_exit(self, unit_id: int, unit_name: str):
-        now = datetime.now().isoformat()
+    def record_exit(self, unit_id: int, unit_name: str, dt: Optional[datetime] = None):
+        now = (dt or datetime.now(TZ_UZB)).isoformat()
         with self._connect() as conn:
             conn.execute("DELETE FROM garage_state WHERE unit_id=?", (unit_id,))
             conn.execute(
@@ -85,7 +86,10 @@ class Database:
             ).fetchone()
         if row:
             try:
-                return datetime.fromisoformat(row["ts"])
+                res = datetime.fromisoformat(row["ts"])
+                if res.tzinfo is None:
+                    res = res.replace(tzinfo=TZ_UZB)
+                return res
             except Exception:
                 return None
         return None
