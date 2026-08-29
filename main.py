@@ -71,7 +71,6 @@ def has_violations(data: dict) -> bool:
     1. ТО просрочено (< 0 км) или скоро ТО (<= 300 км)
     2. Превышен срок рейса / мойки (>= 6 дней для миксеров, >= 4 дней для остальных)
     """
-    # 1. Проверка сервисных интервалов ТО
     m_list = data.get("maintenance") or []
     warn_km = int(data.get("warning_km", 300))
     for m in m_list:
@@ -83,7 +82,6 @@ def has_violations(data: dict) -> bool:
         except (ValueError, TypeError):
             continue
 
-    # 2. Проверка срока нахождения в рейсе / мойки (после выхода из геозоны БКС Гараж)
     last_exit = data.get("last_exit")
     entry_time = data.get("entry_time") or datetime.now(TZ_UZB)
     if last_exit:
@@ -146,14 +144,13 @@ def start_health_server():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card sending (Добавляет номер машины под фото в Telegram)
+# Card sending (Добавляет номер машины под фото)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_card(bot: Bot, data: dict) -> None:
     img = render_card(data)
     is_violation = has_violations(data)
 
-    # Номер и название машины под фото
     car_name = data.get("name", "ТС")
     caption = f"{car_name}"
 
@@ -186,7 +183,6 @@ async def main() -> None:
     log.info("Violations-only groups (%d): %s", len(VIOLATION_CHAT_IDS), VIOLATION_CHAT_IDS)
     log.info("Zone: %s | Poll: %ds | Warn at <= %d km", ZONE_NAME, POLL_INTERVAL, WARN_KM)
 
-    # Start HTTP server in a separate daemon thread for Render health checks
     http_thread = threading.Thread(target=start_health_server, daemon=True)
     http_thread.start()
 
@@ -210,7 +206,6 @@ async def main() -> None:
         return
     log.info("Geofence OK: '%s' (id=%s, points=%d)", zone.get("n"), zone_id, len(zone.get("p", [])))
 
-    # Load saved state
     in_garage: set[int] = db.get_garage_state()
     is_initial_run = len(in_garage) == 0
 
@@ -242,11 +237,13 @@ async def main() -> None:
                         log.info("ENTRY: %s (id=%d)", unit.get("nm"), uid)
                         if not is_initial_run:
                             try:
+                                # Точный выезд запрашивается напрямую у Wialon GPS-трека
+                                last_exit_dt = wialon.get_last_exit_from_wialon(uid, zone, days_back=7) or db.get_last_exit(uid)
                                 card_data = {
                                     "name"       : unit.get("nm", "Неизвестно"),
                                     "driver"     : wialon.get_driver(unit),
                                     "entry_time" : now_time,
-                                    "last_exit"  : db.get_last_exit(uid),
+                                    "last_exit"  : last_exit_dt,
                                     "fuel"       : wialon.get_fuel(unit),
                                     "mileage"    : wialon.get_mileage(unit),
                                     "maintenance": wialon.get_maintenance(unit),
@@ -264,7 +261,6 @@ async def main() -> None:
                 else:
                     if uid in in_garage:              # ← ВЫЕЗД ИЗ ГЕОЗОНЫ БКС ГАРАЖ
                         log.info("EXIT: %s (id=%d)", unit.get("nm"), uid)
-                        # Засекаем точное время выезда из геозоны БКС Гараж для счетчика мойки
                         db.record_exit(uid, unit.get("nm", ""), dt=now_time)
 
             in_garage = current
