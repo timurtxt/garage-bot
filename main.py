@@ -18,7 +18,7 @@ from wialon_client import WialonClient
 load_dotenv(encoding="utf-8")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Config & Group Routing (с гарантированными ID по умолчанию)
+# 1. Config & Group Routing
 # ──────────────────────────────────────────────────────────────────────────────
 TG_TOKEN      = os.environ["TELEGRAM_TOKEN"]
 WIALON_TOKEN  = os.environ["WIALON_TOKEN"]
@@ -83,7 +83,7 @@ def has_violations(data: dict) -> bool:
         except (ValueError, TypeError):
             continue
 
-    # 2. Проверка срока нахождения в рейсе / мойки
+    # 2. Проверка срока нахождения в рейсе / мойки (после выхода из геозоны БКС Гараж)
     last_exit = data.get("last_exit")
     entry_time = data.get("entry_time") or datetime.now(TZ_UZB)
     if last_exit:
@@ -146,12 +146,16 @@ def start_health_server():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card sending
+# Card sending (Добавляет номер машины под фото в Telegram)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_card(bot: Bot, data: dict) -> None:
     img = render_card(data)
     is_violation = has_violations(data)
+
+    # Номер и название машины под фото
+    car_name = data.get("name", "ТС")
+    caption = f"{car_name}"
 
     target_chats = list(dict.fromkeys(ALL_CHAT_IDS))
     if is_violation and VIOLATION_CHAT_IDS:
@@ -159,15 +163,15 @@ async def send_card(bot: Bot, data: dict) -> None:
             if v_cid not in target_chats:
                 target_chats.append(v_cid)
 
-    log.info("Отправка карточки '%s' (нарушение=%s) в группы: %s", data.get("name"), is_violation, target_chats)
+    log.info("Отправка карточки '%s' (нарушение=%s) в группы: %s", car_name, is_violation, target_chats)
 
     for chat_id in target_chats:
         try:
             buf = io.BytesIO()
             img.save(buf, format="PNG", optimize=True)
             buf.seek(0)
-            await bot.send_photo(chat_id=chat_id, photo=buf)
-            log.info("УСПЕШНО: Карточка '%s' отправлена в группу %s", data.get("name"), chat_id)
+            await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption)
+            log.info("УСПЕШНО: Карточка '%s' отправлена в группу %s", car_name, chat_id)
         except Exception as te:
             log.error("ОШИБКА отправки в группу %s: %s", chat_id, te)
 
@@ -220,6 +224,7 @@ async def main() -> None:
 
             units   = wialon.get_units()
             current: set[int] = set()
+            now_time = datetime.now(TZ_UZB)
 
             for unit in units:
                 uid = unit.get("id")
@@ -233,14 +238,14 @@ async def main() -> None:
                 if wialon.is_in_zone(lat, lon, zone):
                     current.add(uid)
 
-                    if uid not in in_garage:          # ← NEW ENTRY
+                    if uid not in in_garage:          # ← ВЪЕЗД В ГАРАЖ
                         log.info("ENTRY: %s (id=%d)", unit.get("nm"), uid)
                         if not is_initial_run:
                             try:
                                 card_data = {
                                     "name"       : unit.get("nm", "Неизвестно"),
                                     "driver"     : wialon.get_driver(unit),
-                                    "entry_time" : datetime.now(TZ_UZB),
+                                    "entry_time" : now_time,
                                     "last_exit"  : db.get_last_exit(uid),
                                     "fuel"       : wialon.get_fuel(unit),
                                     "mileage"    : wialon.get_mileage(unit),
@@ -254,12 +259,13 @@ async def main() -> None:
                             except Exception as ce:
                                 log.error("Card error for '%s': %s", unit.get("nm"), ce, exc_info=True)
 
-                        db.record_entry(uid, unit.get("nm", ""))
+                        db.record_entry(uid, unit.get("nm", ""), dt=now_time)
 
                 else:
-                    if uid in in_garage:              # ← EXIT
+                    if uid in in_garage:              # ← ВЫЕЗД ИЗ ГЕОЗОНЫ БКС ГАРАЖ
                         log.info("EXIT: %s (id=%d)", unit.get("nm"), uid)
-                        db.record_exit(uid, unit.get("nm", ""))
+                        # Засекаем точное время выезда из геозоны БКС Гараж для счетчика мойки
+                        db.record_exit(uid, unit.get("nm", ""), dt=now_time)
 
             in_garage = current
             db.save_garage_state(current)
