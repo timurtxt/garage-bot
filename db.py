@@ -34,6 +34,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_events_unit
                     ON events(unit_id, event_type, ts);
             """)
+            # Удаляем старые тестовые записи от 19 августа, чтобы не было ложных тревог «10 суток в рейсе»
+            conn.execute("DELETE FROM events WHERE ts < '2026-08-28T00:00:00'")
 
     def get_garage_state(self) -> Set[int]:
         with self._connect() as conn:
@@ -89,6 +91,12 @@ class Database:
                 res = datetime.fromisoformat(row["ts"])
                 if res.tzinfo is None:
                     res = res.replace(tzinfo=TZ_UZB)
+
+                # Защита: если запись старше 7 суток, не показываем ложные 10+ суток
+                now = datetime.now(TZ_UZB)
+                if (now - res).total_seconds() > 7 * 86400:
+                    return None
+
                 return res
             except Exception:
                 return None
