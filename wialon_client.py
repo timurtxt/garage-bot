@@ -128,6 +128,7 @@ class WialonClient:
         return items
 
     def get_zone(self, zone_name: str) -> Tuple[Optional[int], Optional[dict]]:
+        """Находит геозону по имени и загружает точные точки полигона."""
         try:
             result = self._call("core/search_items", {
                 "spec": {
@@ -142,42 +143,49 @@ class WialonClient:
                 "to": 0,
             })
             for res in result.get("items", []):
-                rid = res.get("id")
+                res_id = res.get("id")
                 for zid_str, zone in res.get("zl", {}).items():
                     if zone_name.lower() in zone.get("n", "").lower():
                         zid = int(zid_str)
                         try:
-                            zdata = self._call("resource/get_zone_data", {
-                                "itemId": rid,
+                            # flags: 0 возвращает полный массив 19 точек полигона
+                            zd = self._call("resource/get_zone_data", {
+                                "itemId": res_id,
                                 "col": [zid],
-                                "flags": 1
+                                "flags": 0,
                             })
-                            if zdata and isinstance(zdata, list) and len(zdata) > 0:
-                                full_zone = zdata[0]
+                            if zd and isinstance(zd, list) and len(zd) > 0:
+                                full_zone = zd[0]
                                 log.info(
                                     "Zone '%s' found (id=%d) in resource '%s' with %d points",
                                     zone_name, zid, res.get("nm"), len(full_zone.get("p", [])),
                                 )
                                 return zid, full_zone
                         except Exception as ze:
-                            log.warning("resource/get_zone_data error: %s", ze)
+                            log.warning("get_zone_data error: %s", ze)
                         return zid, zone
         except Exception as e:
             log.error("Zone search error: %s", e)
         return None, None
 
     def is_in_zone(self, lat: float, lon: float, zone: dict) -> bool:
-        ztype = zone.get("t", 0)
-        points = zone.get("p", [])
-        radius = zone.get("r", 0)
-        if not points:
+        if not zone:
             return False
-        if ztype == 2:
-            c = points[0]
-            return _haversine(lat, lon, c.get("y", 0), c.get("x", 0)) <= radius
-        if ztype in (1, 3) and len(points) >= 3:
+        points = zone.get("p", [])
+        if not points:
+            b = zone.get("b", {})
+            if b:
+                return (b.get("min_y", 0) <= lat <= b.get("max_y", 0) and
+                        b.get("min_x", 0) <= lon <= b.get("max_x", 0))
+            return False
+
+        if len(points) >= 3:
             poly = [(p.get("y", 0), p.get("x", 0)) for p in points]
             return _point_in_polygon(lat, lon, poly)
+        elif len(points) == 1:
+            c = points[0]
+            r = c.get("r", zone.get("w", 50))
+            return _haversine(lat, lon, c.get("y", 0), c.get("x", 0)) <= r
         return False
 
     def get_unit_pos(self, unit: dict) -> Optional[Tuple[float, float]]:
@@ -282,11 +290,8 @@ class WialonClient:
         intervals.sort(key=lambda x: x["remaining_km"])
         return intervals
 
-    def get_last_exit_from_wialon(self, unit_id: int, zone: dict, days_back: int = 7) -> Optional[datetime]:
-        """
-        Запрашивает GPS-трек напрямую у Wialon и вычисляет точный момент последнего выезда из геозоны.
-        100% надежно, работает прямо из облака GPS-спутников.
-        """
+    def get_last_exit_from_wialon(self, unit_id: int, zone: dict, days_back: int = 5) -> Optional[datetime]:
+        """Запрашивает спутниковый трек у Wialon и вычисляет точный выезд."""
         try:
             poly = [(p.get("y", 0), p.get("x", 0)) for p in zone.get("p", [])]
             if len(poly) < 3:
