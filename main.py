@@ -62,7 +62,7 @@ log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Проверка нарушений (100% надежная)
+# Проверка нарушений
 # ──────────────────────────────────────────────────────────────────────────────
 
 def has_violations(data: dict) -> bool:
@@ -144,7 +144,7 @@ def start_health_server():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card sending (Добавляет номер машины под фото)
+# Card sending
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_card(bot: Bot, data: dict) -> None:
@@ -237,8 +237,16 @@ async def main() -> None:
                         log.info("ENTRY: %s (id=%d)", unit.get("nm"), uid)
                         if not is_initial_run:
                             try:
-                                # Точный выезд запрашивается напрямую у Wialon GPS-трека
-                                last_exit_dt = wialon.get_last_exit_from_wialon(uid, zone, days_back=7) or db.get_last_exit(uid)
+                                # Безопасный запрос точной истории выезда из Wialon GPS
+                                last_exit_dt = None
+                                if hasattr(wialon, "get_last_exit_from_wialon"):
+                                    try:
+                                        last_exit_dt = wialon.get_last_exit_from_wialon(uid, zone, days_back=5)
+                                    except Exception as we:
+                                        log.warning("Wialon exit lookup warning: %s", we)
+                                if not last_exit_dt:
+                                    last_exit_dt = db.get_last_exit(uid)
+
                                 card_data = {
                                     "name"       : unit.get("nm", "Неизвестно"),
                                     "driver"     : wialon.get_driver(unit),
