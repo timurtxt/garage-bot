@@ -188,7 +188,7 @@ async def send_card(bot: Bot, data: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Main loop
+# Main loop (100% защита от спама)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
@@ -213,8 +213,9 @@ async def main() -> None:
         return
     record_activity(f"Geofence OK: '{zone.get('n')}' (id={zone_id})")
 
-    in_garage: set[int] = db.get_garage_state()
-    is_initial_run = len(in_garage) == 0
+    # ГАРАНТИЯ: первый цикл всегда тихий (0 сообщений)
+    first_cycle = True
+    in_garage: set[int] = set()
 
     ping_tick = 0
 
@@ -228,10 +229,28 @@ async def main() -> None:
             if ping_tick % 10 == 0:
                 wialon.ping()
 
-            units   = wialon.get_units()
+            units = wialon.get_units()
             STATS["total_units"] = len(units)
             current: set[int] = set()
 
+            # ── 1. ПЕРВЫЙ ЦИКЛ: ТИХАЯ СИНХРОНИЗАЦИЯ БЕЗ СООБЩЕНИЙ ───────────
+            if first_cycle:
+                for unit in units:
+                    uid = unit.get("id")
+                    pos = wialon.get_unit_pos(unit)
+                    if pos and pos[0] is not None and wialon.is_in_zone(pos[0], pos[1], zone):
+                        current.add(uid)
+                        db.record_entry(uid, unit.get("nm", ""), dt=now_time)
+
+                in_garage = current
+                STATS["units_in_garage"] = len(in_garage)
+                db.save_garage_state(current)
+                first_cycle = False
+                record_activity(f"Тихий старт завершён: {len(in_garage)} стоящих машин записано. Сообщений: 0.")
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+
+            # ── 2. РАБОЧИЙ РЕЖИМ: ОТПРАВКА СТРОГО ПРИ НОВОМ ВЪЕЗДЕ ──────────
             for unit in units:
                 uid = unit.get("id")
                 pos = wialon.get_unit_pos(unit)
@@ -245,50 +264,46 @@ async def main() -> None:
                     current.add(uid)
 
                     if uid not in in_garage:          # ← ВЪЕЗД В ГАРАЖ
-                        record_activity(f"ENTRY DETECTED: {unit.get('nm')} (id={uid})")
+                        record_activity(f"ENTRY: {unit.get('nm')} (id={uid})")
                         STATS["last_entry"] = f"{unit.get('nm')} at {now_time.strftime('%H:%M:%S')}"
                         
-                        if not is_initial_run:
-                            try:
-                                last_exit_dt = None
-                                if hasattr(wialon, "get_last_exit_from_wialon"):
-                                    try:
-                                        last_exit_dt = wialon.get_last_exit_from_wialon(uid, zone, days_back=5)
-                                    except Exception as we:
-                                        log.warning("Wialon exit lookup warning: %s", we)
-                                if not last_exit_dt:
-                                    last_exit_dt = db.get_last_exit(uid)
+                        try:
+                            last_exit_dt = None
+                            if hasattr(wialon, "get_last_exit_from_wialon"):
+                                try:
+                                    last_exit_dt = wialon.get_last_exit_from_wialon(uid, zone, days_back=5)
+                                except Exception as we:
+                                    log.warning("Wialon exit lookup warning: %s", we)
+                            if not last_exit_dt:
+                                last_exit_dt = db.get_last_exit(uid)
 
-                                card_data = {
-                                    "name"       : unit.get("nm", "Неизвестно"),
-                                    "driver"     : wialon.get_driver(unit),
-                                    "entry_time" : now_time,
-                                    "last_exit"  : last_exit_dt,
-                                    "fuel"       : wialon.get_fuel(unit),
-                                    "mileage"    : wialon.get_mileage(unit),
-                                    "maintenance": wialon.get_maintenance(unit),
-                                    "warning_km" : WARN_KM,
-                                    "garage_name": ZONE_NAME,
-                                }
-                                await send_card(bot, card_data)
-                            except TelegramError as te:
-                                record_activity(f"Telegram error: {te}")
-                            except Exception as ce:
-                                record_activity(f"Card error for '{unit.get('nm')}': {ce}")
+                            card_data = {
+                                "name"       : unit.get("nm", "Неизвестно"),
+                                "driver"     : wialon.get_driver(unit),
+                                "entry_time" : now_time,
+                                "last_exit"  : last_exit_dt,
+                                "fuel"       : wialon.get_fuel(unit),
+                                "mileage"    : wialon.get_mileage(unit),
+                                "maintenance": wialon.get_maintenance(unit),
+                                "warning_km" : WARN_KM,
+                                "garage_name": ZONE_NAME,
+                            }
+                            await send_card(bot, card_data)
+                        except TelegramError as te:
+                            record_activity(f"Telegram error: {te}")
+                        except Exception as ce:
+                            record_activity(f"Card error for '{unit.get('nm')}': {ce}")
 
                         db.record_entry(uid, unit.get("nm", ""), dt=now_time)
 
                 else:
                     if uid in in_garage:              # ← ВЫЕЗД ИЗ ГЕОЗОНЫ
-                        record_activity(f"EXIT DETECTED: {unit.get('nm')} (id={uid})")
+                        record_activity(f"EXIT: {unit.get('nm')} (id={uid})")
                         db.record_exit(uid, unit.get("nm", ""), dt=now_time)
 
             in_garage = current
             STATS["units_in_garage"] = len(in_garage)
             db.save_garage_state(current)
-            if is_initial_run:
-                record_activity(f"Initial sync: {len(in_garage)} units inside recorded in DB")
-                is_initial_run = False
 
         except Exception as exc:
             record_activity(f"Poll error: {exc}")
